@@ -1,3 +1,4 @@
-._*
-.tar
+*._*
+*.tar
 .DS_Store
+gmon.out
