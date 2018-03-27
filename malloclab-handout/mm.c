@@ -1,19 +1,17 @@
 /*
- * mm-naive.c - The fastest, least memory-efficient malloc package.
+ * mm.c - The fastest, least memory-efficient malloc package.
  *
- * In this naive approach, a block is allocated by simply incrementing
- * the brk pointer.  A block is pure payload. There are no headers or
- * footers.  Blocks are never coalesced or reused. Realloc is
- * implemented directly using mm_malloc and mm_free.
- *
- * NOTE TO STUDENTS: Replace this header comment with your own header
- * comment that gives a high level description of your solution.
+ * segregated double linked-list with exponetial sized classes
+ * best fit strategy
+ * extend size linear to current heap size
+ * 87/100 performance index
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <unistd.h>
 #include <string.h>
+#include <math.h>
 
 #include "mm.h"
 #include "memlib.h"
@@ -39,7 +37,7 @@ team_t team = {
 
 #ifdef DEBUG
 #define CHECKHEAP() printf("%s\n", __func__); mm_checkheap();
-#define CHECKLIST() printf("%s\n", __func__); mm_checklist();
+#define CHECKLIST() printf("%s\n", __func__); mm_check_all_lists();
 #define PRINT_PTR(ptr) printf("%p\n", (void *) ptr);
 #endif
 
@@ -94,11 +92,16 @@ typedef struct linked_list_node
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)))
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - 2*DSIZE)))
 
+#define NCLASS 30
+#define MAX_SIZE 50000
+#define MAX_HEAP (20*(1<<20))
+
 
 //per csapp text book, it is pointing to the second block of prologue blocks
 static char *heap_listp;
 /*head for linked list*/
-linked_list_node * empty_blocks_head;
+
+linked_list_node* empty_blocks_head;
 
 /*calculate address offset of a pointer relative to start of heap (after prologue) in decimal*/
 int address_offset(void* p){
@@ -142,19 +145,21 @@ void mm_checkheap(){
         cur_status = GET_ALLOC(cur_hd_ptr);
     }
     printf("epilogue block at address: %d \n", address_offset(cur_hd_ptr));
-    printf("current effective heap size: %u \n", mem_heapsize() - 2 * DSIZE - NODE_SIZE);
+    printf("current effective heap size: %u \n", mem_heapsize() - 2 * DSIZE - NCLASS * NODE_SIZE);
     printf("heap high address: %d \n", address_offset(mem_heap_hi()));
     printf("\n");
 }
 
 
-/*heap checker print all the free list, start from the head*/
-void mm_checklist(){
+/*heap checker print one free list from selected head*/
+void mm_check_one_list(linked_list_node* list_head){
 
-    linked_list_node *prev_node = empty_blocks_head;
+    linked_list_node *prev_node = list_head;
     linked_list_node *cur_node;
 
-    printf("block head at %d\n",address_offset(empty_blocks_head));
+    int idx = (int) (list_head - empty_blocks_head);
+
+    printf("list idx: %d, block head at %d\n",idx, address_offset(empty_blocks_head));
 
     char* cur_blk_ptr;
 
@@ -167,6 +172,30 @@ void mm_checklist(){
             address_offset(cur_node->next));
         prev_node = cur_node;
     }
+}
+
+/*heap checker print all the free lists, start from the head*/
+void mm_check_all_lists(){
+    for (int i=0; i < NCLASS;i++){
+        mm_check_one_list(&empty_blocks_head[i]);
+    }
+}
+/* helper function to find the list head according to block size*/
+/* need to optimize the function */
+linked_list_node* find_list_head(size_t size){
+    float base = 1.5;
+    //min size required to allocate a new block
+    float offset = floor(log(24)/log(base));
+    int exp = (int) (floor(log(size)/log(base)) - offset);
+
+
+    // int step_size = MAX_SIZE/NCLASS;
+    // int exp = size/step_size;
+
+    if (exp > NCLASS - 1) exp = NCLASS - 1;
+
+    if (DEBUG) printf("assigned to list %d with size %u\n",exp, size);
+    return &empty_blocks_head[exp];
 }
 
 
@@ -231,16 +260,26 @@ static void *coalesce(void *bp)
 
     linked_list_node* cur;
     linked_list_node* next;
+    linked_list_node* prev;
 
     if (prev_alloc && next_alloc) {
         return bp;
     }
 
     else if (prev_alloc && !next_alloc) {
+        //delete current block
+        cur = (linked_list_node*)NRP(bp);
+        list_delete(cur);
+
         //delete next free block from the list
         next = (linked_list_node*)NRP(NEXT_BLKP(bp));
-        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
         list_delete(next);
+
+        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
+
+        //insert the new block to the free block list (with updated size)
+        linked_list_node* list_head = find_list_head(size);
+        list_insert(list_head,cur);
 
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size,0));
@@ -248,13 +287,22 @@ static void *coalesce(void *bp)
 
     else if (!prev_alloc && next_alloc) {
 
+        //delete previous block
+        prev = (linked_list_node*)NRP(PREV_BLKP(bp));
+        list_delete(prev);
         //delete current free block from the list
         cur = (linked_list_node*)NRP(bp);
         list_delete(cur);
 
         size += GET_SIZE(HDRP(PREV_BLKP(bp)));
+
+        //insert the new block to the free block list (with updated size)
+        linked_list_node* list_head = find_list_head(size);
+        list_insert(list_head,prev);
+
         PUT(FTRP(bp), PACK(size, 0));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+
         bp = PREV_BLKP(bp);
     }
 
@@ -262,19 +310,34 @@ static void *coalesce(void *bp)
         //delete current free block from the list
         cur = (linked_list_node*)NRP(bp);
         list_delete(cur);
+
+        //delete previous block
+        prev = (linked_list_node*)NRP(PREV_BLKP(bp));
+        list_delete(prev);
+
         //delete next free block from the list
         next = (linked_list_node*)NRP(NEXT_BLKP(bp));
         list_delete(next);
 
         size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
+
+        //insert the new block to the free block list (with updated size)
+        linked_list_node* list_head = find_list_head(size);
+        list_insert(list_head,prev);
+
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
+
         bp = PREV_BLKP(bp);
     }
     return bp;
 }
 
 static void *extend_heap(size_t words){
+    if (DEBUG) printf("extended size: %d\n", words * WSIZE);
+    //CHECKHEAP();
+
+
     linked_list_node *np;
     void *bp;
     size_t size;
@@ -298,13 +361,22 @@ static void *extend_heap(size_t words){
     PUT(FTRP(bp), PACK(size, 0)); /* Free block footer */
 
     //insert the free block to the free block list
-    list_insert(empty_blocks_head,np);
+    linked_list_node* list_head = find_list_head(size);
+    list_insert(list_head,np);
 
     //CHECKLIST();
 
     PUT(FTRP(bp) + WSIZE, PACK(0, 1)); /* New epilogue header */
     /* Coalesce if the previous block was free */
     return coalesce(bp);
+}
+
+/* initialize segregated list */
+void init_seg_list(linked_list_node * list_head){
+    for (int i=0; i < NCLASS; i++){
+        list_head[i].prev = NULL;
+        list_head[i].next = NULL;
+    }
 }
 
 /*
@@ -318,40 +390,42 @@ int mm_init(void)
     mem_init();
     mem_reset_brk();
 
+    /*area storing heads for segregated linked list */
+    size_t nodes_head_offset = NCLASS * NODE_SIZE;
+
     if (DEBUG) printf("____________init.....______________\n");
 
-    if ((heap_listp = mem_sbrk(4*WSIZE + NODE_SIZE)) == (void *)-1) return -1;
+    if ((heap_listp = mem_sbrk(4*WSIZE + nodes_head_offset)) == (void *)-1) return -1;
 
     PUT(heap_listp, 0);
     //prologue block header
-    PUT(heap_listp + WSIZE, PACK(DSIZE + NODE_SIZE, 1));
+    PUT(heap_listp + WSIZE, PACK(DSIZE + nodes_head_offset, 1));
+
     //put linked list node inside the prologue
     empty_blocks_head = (linked_list_node *) (heap_listp + 2*WSIZE);
+    init_seg_list(empty_blocks_head);
 
-    empty_blocks_head -> prev = NULL;
-    empty_blocks_head -> next = NULL;
-
-    PUT(heap_listp + (2*WSIZE + NODE_SIZE), PACK(DSIZE + NODE_SIZE, 1));
+    //prologue footer
+    PUT(heap_listp + (2*WSIZE + nodes_head_offset), PACK(DSIZE + nodes_head_offset, 1));
     //epilogue block
-    PUT(heap_listp + (3*WSIZE + NODE_SIZE), PACK(0, 1));
+    PUT(heap_listp + (3*WSIZE + nodes_head_offset), PACK(0, 1));
 
-    heap_listp += DSIZE + NODE_SIZE;
+    heap_listp += DSIZE + nodes_head_offset;
     /* Extend the empty heap with a free block of CHUNKSIZE bytes */
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL) return -1;
     return 0;
 }
 
 
-
-void *find_fit(size_t size){
+/* find fit given a list head */
+void *find_fit_in_one_list(size_t size, linked_list_node* list_head){
     linked_list_node *empty_blk;
     //CHECKLIST();
-
-    if (!(empty_blocks_head) || (!(empty_blk = empty_blocks_head -> next))){
+    if (!(list_head) || (!(empty_blk = list_head -> next))){
         return NULL;
     }
     //record the size and location of the first free block
-    size_t best_blk_size = 2 * mem_heapsize() + 1; //a very large number, any qualify fit will replace this
+    size_t best_blk_size = 2 * MAX_HEAP + 1; //a very large number, any qualify fit will replace this
     size_t cur_blk_size;
     void * best_bp = NULL;
     //CHECKLIST();
@@ -363,13 +437,34 @@ void *find_fit(size_t size){
         if (cur_blk_size >= size){
             //check if better than current best fit
             if ((cur_blk_size - size) < (best_blk_size - size)){
-                best_blk_size = cur_blk_size;
-                best_bp = (void *) NP_TO_BP(empty_blk);
+            best_blk_size = cur_blk_size;
+            best_bp = (void *) NP_TO_BP(empty_blk);
             }
+            //break;
         }
         empty_blk = empty_blk ->next;
     }
-    if (DEBUG && best_bp) printf("find_fit of %u bytes with %u bytes block at %d\n", size, best_blk_size, address_offset(best_bp));
+
+    if (DEBUG){
+        int idx = (int) (list_head - empty_blocks_head);
+        printf("find fit: Searched list %d\n", idx);
+        if (best_bp){
+            printf("find_fit %u bytes with %u bytes block at %d: in list %d\n", size, cur_blk_size, address_offset(best_bp), idx);
+        }
+    }
+    return best_bp;
+}
+
+/* find fit in all segregated list, start from the smaller sized nodes*/
+void* find_fit(size_t size){
+    void * best_bp = NULL;
+    linked_list_node *cur_list_head = find_list_head(size);
+    int idx = (int) (cur_list_head - empty_blocks_head);
+
+    while (idx < NCLASS && (!(cur_list_head-> next) || !(best_bp = find_fit_in_one_list(size, cur_list_head)))){
+        cur_list_head++;
+        idx++;
+    }
     return best_bp;
 }
 
@@ -401,7 +496,9 @@ void *deallocate_block(void* bp, size_t size){
     PUT(FTRP(bp),PACK(size, 0));
     //delete block from linked list
     linked_list_node *np = NRP(bp);
-    list_insert(empty_blocks_head, np);
+
+    linked_list_node* list_head = find_list_head(size);
+    list_insert(list_head,np);
     //CHECKLIST();
     //CHECKHEAP();
     return bp;
@@ -486,7 +583,8 @@ void *mm_malloc(size_t size)
     bp = find_fit(asize);
 
     while (bp == NULL && mem_heapsize() <= MAX_HEAP){
-        extendsize = mem_heapsize() - 2 * DSIZE - NODE_SIZE;
+        extendsize = (mem_heapsize() - 2 * DSIZE - NCLASS * NODE_SIZE) * 0.025;
+        //printf("extended %d bytes\n", extendsize);
         if (!(extend_heap(extendsize/WSIZE))) return NULL;
         bp = find_fit(asize);
     }
@@ -531,13 +629,11 @@ void *mm_realloc(void *ptr, size_t size)
     if (old_size == asize){
         return ptr;
     }else if(old_size > asize){
-        //free the block then place the smaller block into freed block
-        mm_free(ptr);
+        //deallocate the block then place the smaller block into freed block
+        deallocate_block(ptr, old_size);
         ptr = place(ptr, asize);
     }else{
         char* cur_block = (char *)ptr;
-        mm_free(cur_block);
-
         payload = old_size - 16;
         char temp_storage[payload];
         //has to copy out the bytes first before mmalloc
@@ -545,15 +641,16 @@ void *mm_realloc(void *ptr, size_t size)
             printf("mm_realloc: memcpy error\n");
             exit(1);
         }
+        mm_free(cur_block);
         void* new_ptr = mm_malloc(size);
 
-        if (!memmove(new_ptr, temp_storage, payload)){
+        if (!memcpy(new_ptr, temp_storage, payload)){
             printf("mm_realloc: memcpy error\n");
             exit(1);
         }
 
         if (DEBUG) printf("copyed %d bytes from %d to %d\n", payload, address_offset(ptr), address_offset(new_ptr));
-
+        //CHECKHEAP();
         ptr = new_ptr;
 
     }
