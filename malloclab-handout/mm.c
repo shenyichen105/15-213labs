@@ -1,10 +1,10 @@
 /*
- * mm.c - The fastest, least memory-efficient malloc package.
+ * mm.c - The fast malloc package.
  *
- * segregated double linked-list with exponetial sized classes
+ * segregated double linked-list with uniform-stepped sized classes
  * best fit strategy
  * extend size linear to current heap size
- * 87/100 performance index
+ * 88/100 performance index
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -92,7 +92,7 @@ typedef struct linked_list_node
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)))
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - 2*DSIZE)))
 
-#define NCLASS 30
+#define NCLASS 50
 #define MAX_SIZE 50000
 #define MAX_HEAP (20*(1<<20))
 
@@ -183,14 +183,14 @@ void mm_check_all_lists(){
 /* helper function to find the list head according to block size*/
 /* need to optimize the function */
 linked_list_node* find_list_head(size_t size){
-    float base = 1.5;
-    //min size required to allocate a new block
-    float offset = floor(log(24)/log(base));
-    int exp = (int) (floor(log(size)/log(base)) - offset);
+    // float base = 1.5;
+    // //min size required to allocate a new block
+    // float offset = floor(log(24)/log(base));
+    // int exp = (int) (floor(log(size)/log(base)) - offset);
 
 
-    // int step_size = MAX_SIZE/NCLASS;
-    // int exp = size/step_size;
+    int step_size = MAX_SIZE/NCLASS;
+    int exp = size/step_size;
 
     if (exp > NCLASS - 1) exp = NCLASS - 1;
 
@@ -583,7 +583,7 @@ void *mm_malloc(size_t size)
     bp = find_fit(asize);
 
     while (bp == NULL && mem_heapsize() <= MAX_HEAP){
-        extendsize = (mem_heapsize() - 2 * DSIZE - NCLASS * NODE_SIZE) * 0.025;
+        extendsize = (int)((mem_heapsize()- 2 * DSIZE - NCLASS * NODE_SIZE) * 0.01);
         //printf("extended %d bytes\n", extendsize);
         if (!(extend_heap(extendsize/WSIZE))) return NULL;
         bp = find_fit(asize);
@@ -636,18 +636,29 @@ void *mm_realloc(void *ptr, size_t size)
         char* cur_block = (char *)ptr;
         payload = old_size - 16;
         char temp_storage[payload];
-        //has to copy out the bytes first before mmalloc
+
+        mm_free(cur_block);
+
+        //if there is enough space with coaleasing, just stay in the location
+        if (GET_SIZE(HDRP(ptr)) >= asize){
+            ptr = place(ptr, asize);
+            return ptr;
+        }
+
+        //if not, has to copy out the bytes first before mmalloc
         if (!memcpy(temp_storage, ptr, payload)){
             printf("mm_realloc: memcpy error\n");
             exit(1);
         }
-        mm_free(cur_block);
+
         void* new_ptr = mm_malloc(size);
+        //if allocated to different locations
 
         if (!memcpy(new_ptr, temp_storage, payload)){
-            printf("mm_realloc: memcpy error\n");
-            exit(1);
+                printf("mm_realloc: memcpy error\n");
+                exit(1);
         }
+
 
         if (DEBUG) printf("copyed %d bytes from %d to %d\n", payload, address_offset(ptr), address_offset(new_ptr));
         //CHECKHEAP();
