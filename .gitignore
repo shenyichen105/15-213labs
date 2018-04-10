@@ -1,3 +1,8 @@
 *._*
 *.tar
 *.DS_Store
+.DS_Store
+gmon.out
+*.s
+*.o
+
